@@ -1,6 +1,6 @@
 {
-  "name": "Khasi Bridge",
-  "short_name": "Khasi Bridge",
+  "name": "Bridge Voice",
+  "short_name": "Bridge Voice",
   "description": "Speak English, Hindi, or any language and get it translated into Khasi, Assamese, and other Indian and Asian languages.",
   "start_url": "./index.html",
   "scope": "./",
