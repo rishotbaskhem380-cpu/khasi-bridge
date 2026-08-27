@@ -290,16 +290,15 @@
   <div class="card" style="margin-top:8px;">
     <div class="lang-row" style="margin-bottom:12px;">
       <div style="flex:1;">
-        <label>Type in Khasi — get it in any language below</label>
+        <label for="typedSource">Type in</label>
+        <select id="typedSource"></select>
       </div>
-    </div>
-    <div class="lang-row" style="margin-bottom:12px;">
       <div style="flex:1;">
-        <label for="typedTarget">Translate Khasi into</label>
+        <label for="typedTarget">Translate into</label>
         <select id="typedTarget"></select>
       </div>
     </div>
-    <textarea id="typedInput" placeholder="Type a Khasi sentence…" rows="3" style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:10px 12px;border-radius:8px;font-family:'Space Grotesk',sans-serif;font-size:14px;resize:vertical;"></textarea>
+    <textarea id="typedInput" placeholder="Type a sentence…" rows="3" style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:10px 12px;border-radius:8px;font-family:'Space Grotesk',sans-serif;font-size:14px;resize:vertical;"></textarea>
     <div style="height:10px;"></div>
     <div class="controls">
       <button id="translateTypedBtn" style="background:var(--signal);color:#06231c;">Translate this text</button>
@@ -403,6 +402,7 @@ targetSel.addEventListener('change', () => {
   targetLabel.textContent = targetSel.options[targetSel.selectedIndex].textContent;
 });
 
+populateGrouped(document.getElementById('typedSource'), 'kha');
 populateGrouped(document.getElementById('typedTarget'), 'en');
 
 if('serviceWorker' in navigator){
@@ -636,11 +636,12 @@ translateTypedBtn.addEventListener('click', () => {
 });
 
 async function translateTypedText(text){
+  const source = document.getElementById('typedSource').value;
   const target = document.getElementById('typedTarget').value;
   setStatus("Translating…");
   const urls = [
-    `https://translate.google.com/translate_a/single?client=gtx&sl=kha&tl=${target}&dt=t&q=${encodeURIComponent(text)}`,
-    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=kha&tl=${target}&dt=t&q=${encodeURIComponent(text)}`
+    `https://translate.google.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`,
+    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`
   ];
   let translated = "";
   const maxAttempts = 3;
