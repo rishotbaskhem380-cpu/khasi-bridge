@@ -403,7 +403,11 @@ targetSel.addEventListener('change', () => {
 });
 
 populateGrouped(document.getElementById('typedSource'), 'kha');
-populateGrouped(document.getElementById('typedTarget'), 'en');
+const typedTargetSel = document.getElementById('typedTarget');
+populateGrouped(typedTargetSel, 'en');
+typedTargetSel.addEventListener('change', () => {
+  targetLabel.textContent = typedTargetSel.options[typedTargetSel.selectedIndex].textContent;
+});
 
 if('serviceWorker' in navigator){
   window.addEventListener('load', () => {
