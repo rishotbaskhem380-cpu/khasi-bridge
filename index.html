@@ -560,37 +560,84 @@ clearBtn.addEventListener('click', () => {
   setStatus("");
 });
 
-async function fetchTranslation(url){
-  const res = await fetch(url);
-  const data = await res.json();
-  return data?.[0]?.map(seg => seg[0]).join('') || "";
+// Fetch with a hard timeout — plain fetch() has no timeout of its own,
+// so a slow/stalled connection (common on flaky mobile data) can hang
+// for way longer than feels like "a moment" before finally failing.
+async function fetchTranslation(url, timeoutMs = 5000){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try{
+    const res = await fetch(url, { signal: controller.signal });
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return data?.[0]?.map(seg => seg[0]).join('') || "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Third fallback provider — free, no key, different infra than Google's
+// endpoints, so it covers cases where Google's endpoints specifically
+// are slow/blocked on a given network. (Note: like the LibreTranslate
+// option, this won't have Khasi in its language list — it mainly helps
+// the typed-text / other-language-pair path, not the Khasi-target path.)
+async function fetchTranslationMyMemory(text, source, target, timeoutMs = 5000){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try{
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${source}|${target}`;
+    const res = await fetch(url, { signal: controller.signal });
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return data?.responseData?.translatedText || "";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+// Shared retry/fallback logic used by both the voice path and the
+// typed-text path. Tries googleapis.com first (it's the more reliable
+// of the two Google endpoints — translate.google.com's plain domain
+// often gets blocked by the browser's CORS policy and just wastes an
+// attempt), then translate.google.com, then MyMemory as a last resort,
+// each with its own 5s timeout, across up to 3 rounds with backoff.
+async function translateWithFallback(text, source, target, onRetry){
+  const urls = [
+    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`,
+    `https://translate.google.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`
+  ];
+  const maxAttempts = 3;
+  for(let attempt = 1; attempt <= maxAttempts; attempt++){
+    for(const url of urls){
+      try{
+        const translated = await fetchTranslation(url);
+        if(translated) return translated;
+      }catch(e){ /* try next url silently */ }
+    }
+    try{
+      const translated = await fetchTranslationMyMemory(text, source, target);
+      if(translated) return translated;
+    }catch(e){ /* try next attempt silently */ }
+
+    if(attempt < maxAttempts){
+      onRetry(attempt + 1);
+      await sleep(1000 * attempt);
+    }
+  }
+  return "";
+}
 
 async function translateText(text, sourceLangCode){
   const short = sourceLangCode.split('-')[0];
   const target = targetSel.value;
   targetLabel.textContent = targetSel.options[targetSel.selectedIndex].textContent;
   setStatus("Translating…");
-  const urls = [
-    `https://translate.google.com/translate_a/single?client=gtx&sl=${short}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`,
-    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${short}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`
-  ];
-  let translated = "";
-  const maxAttempts = 3;
-  for(let attempt = 1; attempt <= maxAttempts && !translated; attempt++){
-    for(const url of urls){
-      try{
-        translated = await fetchTranslation(url);
-        if(translated) break;
-      }catch(e){ /* try next url/attempt silently */ }
-    }
-    if(!translated && attempt < maxAttempts){
-      setStatus(`Translating… (retrying, attempt ${attempt+1})`);
-      await sleep(1200 * attempt);
-    }
-  }
+
+  const translated = await translateWithFallback(text, short, target,
+    (attempt) => setStatus(`Translating… (retrying, attempt ${attempt})`));
+
   if(translated){
     translatedText.textContent = translated;
     translatedText.classList.remove('placeholder');
@@ -643,24 +690,10 @@ async function translateTypedText(text){
   const source = document.getElementById('typedSource').value;
   const target = document.getElementById('typedTarget').value;
   setStatus("Translating…");
-  const urls = [
-    `https://translate.google.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`,
-    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`
-  ];
-  let translated = "";
-  const maxAttempts = 3;
-  for(let attempt = 1; attempt <= maxAttempts && !translated; attempt++){
-    for(const url of urls){
-      try{
-        translated = await fetchTranslation(url);
-        if(translated) break;
-      }catch(e){ /* try next url/attempt silently */ }
-    }
-    if(!translated && attempt < maxAttempts){
-      setStatus(`Translating… (retrying, attempt ${attempt+1})`);
-      await sleep(1200 * attempt);
-    }
-  }
+
+  const translated = await translateWithFallback(text, source, target,
+    (attempt) => setStatus(`Translating… (retrying, attempt ${attempt})`));
+
   if(translated){
     translatedText.textContent = translated;
     translatedText.classList.remove('placeholder');
