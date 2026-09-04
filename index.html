@@ -563,14 +563,20 @@ clearBtn.addEventListener('click', () => {
 // Fetch with a hard timeout — plain fetch() has no timeout of its own,
 // so a slow/stalled connection (common on flaky mobile data) can hang
 // for way longer than feels like "a moment" before finally failing.
-async function fetchTranslation(url, timeoutMs = 5000){
+// Timeout is longer than before (8s, was 5s) because on weak 4G a slow
+// response isn't necessarily a dead one — but since we now RACE all
+// endpoints at once instead of trying them one at a time, a longer
+// timeout here no longer means a longer wait overall.
+async function fetchTranslation(url, timeoutMs = 8000){
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try{
     const res = await fetch(url, { signal: controller.signal });
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    return data?.[0]?.map(seg => seg[0]).join('') || "";
+    const translated = data?.[0]?.map(seg => seg[0]).join('') || "";
+    if(!translated) throw new Error("Empty translation");
+    return translated;
   } finally {
     clearTimeout(timer);
   }
@@ -581,7 +587,7 @@ async function fetchTranslation(url, timeoutMs = 5000){
 // are slow/blocked on a given network. (Note: like the LibreTranslate
 // option, this won't have Khasi in its language list — it mainly helps
 // the typed-text / other-language-pair path, not the Khasi-target path.)
-async function fetchTranslationMyMemory(text, source, target, timeoutMs = 5000){
+async function fetchTranslationMyMemory(text, source, target, timeoutMs = 8000){
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try{
@@ -589,7 +595,9 @@ async function fetchTranslationMyMemory(text, source, target, timeoutMs = 5000){
     const res = await fetch(url, { signal: controller.signal });
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    return data?.responseData?.translatedText || "";
+    const translated = data?.responseData?.translatedText || "";
+    if(!translated) throw new Error("Empty translation");
+    return translated;
   } finally {
     clearTimeout(timer);
   }
@@ -597,33 +605,53 @@ async function fetchTranslationMyMemory(text, source, target, timeoutMs = 5000){
 
 async function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
-// Shared retry/fallback logic used by both the voice path and the
-// typed-text path. Tries googleapis.com first (it's the more reliable
-// of the two Google endpoints — translate.google.com's plain domain
-// often gets blocked by the browser's CORS policy and just wastes an
-// attempt), then translate.google.com, then MyMemory as a last resort,
-// each with its own 5s timeout, across up to 3 rounds with backoff.
-async function translateWithFallback(text, source, target, onRetry){
-  const urls = [
-    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`,
-    `https://translate.google.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`
-  ];
-  const maxAttempts = 3;
-  for(let attempt = 1; attempt <= maxAttempts; attempt++){
-    for(const url of urls){
-      try{
-        const translated = await fetchTranslation(url);
-        if(translated) return translated;
-      }catch(e){ /* try next url silently */ }
-    }
-    try{
-      const translated = await fetchTranslationMyMemory(text, source, target);
-      if(translated) return translated;
-    }catch(e){ /* try next attempt silently */ }
+// Races a list of promise-returning functions against each other and
+// returns whichever succeeds first. If ALL of them fail, throws the
+// last error. This is the key improvement for weak connections: instead
+// of waiting for endpoint 1 to time out before even trying endpoint 2,
+// all endpoints are tried at the same moment, so total wait time is
+// close to whichever one is fastest, not the sum of all of them.
+async function raceForSuccess(tasks){
+  return new Promise((resolve, reject) => {
+    let remaining = tasks.length;
+    let lastError = null;
+    tasks.forEach(task => {
+      task().then(resolve).catch(err => {
+        lastError = err;
+        remaining--;
+        if(remaining === 0) reject(lastError);
+      });
+    });
+  });
+}
 
-    if(attempt < maxAttempts){
-      onRetry(attempt + 1);
-      await sleep(1000 * attempt);
+// Shared retry/fallback logic used by both the voice path and the
+// typed-text path.
+//   - Each ROUND races all 3 providers simultaneously (fastest wins).
+//   - Up to 4 rounds total, with a short growing pause between rounds,
+//     entirely automatic — no need to tap any button to retry.
+//   - Checks navigator.onLine first so a fully offline phone gets an
+//     honest, immediate message instead of pretending to try.
+async function translateWithFallback(text, source, target, onRetry){
+  if(typeof navigator !== 'undefined' && navigator.onLine === false){
+    throw new Error("OFFLINE");
+  }
+
+  const tasks = [
+    () => fetchTranslation(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`),
+    () => fetchTranslation(`https://translate.google.com/translate_a/single?client=gtx&sl=${source}&tl=${target}&dt=t&q=${encodeURIComponent(text)}`),
+    () => fetchTranslationMyMemory(text, source, target),
+  ];
+
+  const maxRounds = 4;
+  for(let round = 1; round <= maxRounds; round++){
+    try{
+      return await raceForSuccess(tasks.map(t => t)); // fresh calls each round
+    }catch(e){
+      if(round < maxRounds){
+        onRetry(round + 1);
+        await sleep(800 * round); // 0.8s, 1.6s, 2.4s
+      }
     }
   }
   return "";
@@ -635,16 +663,24 @@ async function translateText(text, sourceLangCode){
   targetLabel.textContent = targetSel.options[targetSel.selectedIndex].textContent;
   setStatus("Translating…");
 
-  const translated = await translateWithFallback(text, short, target,
-    (attempt) => setStatus(`Translating… (retrying, attempt ${attempt})`));
+  try{
+    const translated = await translateWithFallback(text, short, target,
+      (attempt) => setStatus(`Translating… (retrying automatically, attempt ${attempt})`));
 
-  if(translated){
-    translatedText.textContent = translated;
-    translatedText.classList.remove('placeholder');
-    lastEnglish = translated;
-    setStatus("Done.");
-  } else {
-    setStatus("Translation is taking a moment — please tap Start listening again in a few seconds.", true);
+    if(translated){
+      translatedText.textContent = translated;
+      translatedText.classList.remove('placeholder');
+      lastEnglish = translated;
+      setStatus("Done.");
+    } else {
+      setStatus("Translation is taking a moment — please tap Start listening again in a few seconds.", true);
+    }
+  }catch(e){
+    if(e.message === "OFFLINE"){
+      setStatus("You appear to be offline — check your connection and try again.", true);
+    } else {
+      setStatus("Translation is taking a moment — please tap Start listening again in a few seconds.", true);
+    }
   }
 }
 
@@ -691,17 +727,25 @@ async function translateTypedText(text){
   const target = document.getElementById('typedTarget').value;
   setStatus("Translating…");
 
-  const translated = await translateWithFallback(text, source, target,
-    (attempt) => setStatus(`Translating… (retrying, attempt ${attempt})`));
+  try{
+    const translated = await translateWithFallback(text, source, target,
+      (attempt) => setStatus(`Translating… (retrying automatically, attempt ${attempt})`));
 
-  if(translated){
-    translatedText.textContent = translated;
-    translatedText.classList.remove('placeholder');
-    targetLabel.textContent = document.getElementById('typedTarget').selectedOptions[0].textContent;
-    lastEnglish = translated;
-    setStatus("Done.");
-  } else {
-    setStatus("Translation is taking a moment — please try again in a few seconds.", true);
+    if(translated){
+      translatedText.textContent = translated;
+      translatedText.classList.remove('placeholder');
+      targetLabel.textContent = document.getElementById('typedTarget').selectedOptions[0].textContent;
+      lastEnglish = translated;
+      setStatus("Done.");
+    } else {
+      setStatus("Translation is taking a moment — please try again in a few seconds.", true);
+    }
+  }catch(e){
+    if(e.message === "OFFLINE"){
+      setStatus("You appear to be offline — check your connection and try again.", true);
+    } else {
+      setStatus("Translation is taking a moment — please try again in a few seconds.", true);
+    }
   }
 }
 </script>
